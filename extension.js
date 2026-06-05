@@ -8,19 +8,21 @@ export default class MaximizeNewWindows extends Extension {
   // GNOME 49 changed the maximize API: get_maximized() was replaced by
   // is_maximized()/get_maximize_flags(), and maximize() lost its directions
   // argument (it now maximizes BOTH by default). Detect the new API by the
-  // presence of get_maximize_flags() and branch accordingly, so the same
-  // code works on GNOME 45-50.
+  // presence of get_maximize_flags() so the same code works on GNOME 45-50.
+  _hasNewMaximizeApi(win) {
+    return typeof win.get_maximize_flags === "function";
+  }
+
   _isFullyMaximized(win) {
-    const flags =
-      typeof win.get_maximize_flags === "function"
-        ? win.get_maximize_flags() // GNOME 49+
-        : win.get_maximized(); // GNOME 45-48
+    const flags = this._hasNewMaximizeApi(win)
+      ? win.get_maximize_flags() // GNOME 49+
+      : win.get_maximized(); // GNOME 45-48
 
     return flags === Meta.MaximizeFlags.BOTH;
   }
 
   _doMaximize(win) {
-    if (typeof win.get_maximize_flags === "function") {
+    if (this._hasNewMaximizeApi(win)) {
       win.maximize(); // GNOME 49+: defaults to BOTH
     } else {
       win.maximize(Meta.MaximizeFlags.BOTH); // GNOME 45-48
@@ -58,6 +60,14 @@ export default class MaximizeNewWindows extends Extension {
     this._sources.add(sourceId);
   }
 
+  // Stop tracking an actor entry and disconnect both of its signals. Safe to
+  // call more than once: the Set.delete() guard makes repeat calls no-ops.
+  _cleanupEntry(entry) {
+    if (!this._actorSignals.delete(entry)) return;
+    if (entry.firstFrameId) entry.actor.disconnect(entry.firstFrameId);
+    if (entry.destroyId) entry.actor.disconnect(entry.destroyId);
+  }
+
   _onWindowCreated(win) {
     const actor = win.get_compositor_private();
     if (!actor) return;
@@ -67,14 +77,21 @@ export default class MaximizeNewWindows extends Extension {
     // Maximizing at this point is frequently dropped (a window-init race in
     // mutter), which is the intermittent miss. Wait for the first frame, then
     // defer the maximize to an idle callback once the size is settled.
-    let firstFrameId = 0;
-    firstFrameId = actor.connect("first-frame", () => {
-      actor.disconnect(firstFrameId);
-      this._actorSignals.delete(entry);
+    const entry = { actor, firstFrameId: 0, destroyId: 0 };
+
+    entry.firstFrameId = actor.connect("first-frame", () => {
+      this._cleanupEntry(entry);
       this._maximizeLater(win);
     });
 
-    const entry = { actor, id: firstFrameId };
+    // The window can be destroyed before its first frame is drawn (a quickly
+    // closed or crashed application): first-frame would never fire and the
+    // entry would leak in _actorSignals, holding a reference to a destroyed
+    // actor until disable(). Drop it on the actor's destroy as well.
+    entry.destroyId = actor.connect("destroy", () => {
+      this._cleanupEntry(entry);
+    });
+
     this._actorSignals.add(entry);
   }
 
@@ -92,7 +109,8 @@ export default class MaximizeNewWindows extends Extension {
     // while windows are already open). Maximize them separately; they have
     // already been drawn, so deferring to an idle callback is enough.
     for (const actor of global.get_window_actors()) {
-      this._maximizeLater(actor.meta_window);
+      const win = actor.meta_window;
+      if (win) this._maximizeLater(win);
     }
   }
 
@@ -102,8 +120,11 @@ export default class MaximizeNewWindows extends Extension {
       this._windowCreatedId = null;
     }
 
-    for (const { actor, id } of this._actorSignals) {
-      actor.disconnect(id);
+    // Do not use _cleanupEntry here: it mutates the Set, which is unsafe while
+    // iterating. Disconnect directly, then clear the whole set at once.
+    for (const entry of this._actorSignals) {
+      if (entry.firstFrameId) entry.actor.disconnect(entry.firstFrameId);
+      if (entry.destroyId) entry.actor.disconnect(entry.destroyId);
     }
     this._actorSignals.clear();
     this._actorSignals = null;
