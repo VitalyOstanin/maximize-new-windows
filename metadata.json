@@ -1,0 +1,7 @@
+{
+  "uuid": "maximize-new-windows@VitalyOstanin",
+  "name": "Maximize new windows",
+  "description": "Automatically maximizes newly created normal windows once they have drawn their first frame, so applications open maximized by default.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version-name": "1.0"
+}
