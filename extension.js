@@ -30,24 +30,24 @@ export default class MaximizeNewWindows extends Extension {
   _maximize(win) {
     if (!win) return;
 
-    // Максимизируем только обычные окна; диалоги, всплывающие и
-    // служебные окна не трогаем.
+    // Only maximize normal windows; leave dialogs, popups and other
+    // non-normal windows untouched.
     if (win.get_window_type() !== Meta.WindowType.NORMAL) return;
 
     if (!win.can_maximize()) return;
 
     if (this._isFullyMaximized(win)) return;
 
-    // К моменту вызова геометрия должна быть согласована; нулевой размер
-    // означает, что окно ещё не готово — пропускаем.
+    // By now the geometry should be settled; a zero size means the window is
+    // not ready yet, so skip it.
     const rect = win.get_frame_rect();
     if (rect.width === 0 || rect.height === 0) return;
 
     this._doMaximize(win);
   }
 
-  // Отложенный одноразовый вызов в idle с учётом в this._sources, чтобы
-  // снять таймер в disable().
+  // One-shot deferred call in an idle callback, tracked in this._sources so
+  // the timer can be removed in disable().
   _maximizeLater(win) {
     let sourceId = 0;
     sourceId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
@@ -62,11 +62,11 @@ export default class MaximizeNewWindows extends Extension {
     const actor = win.get_compositor_private();
     if (!actor) return;
 
-    // На сигнале window-created MetaWindowActor уже существует, но окно
-    // ещё не отрисовано, а приложение не успело выставить геометрию.
-    // Максимизация в этот момент часто отбрасывается (гонка инициализации
-    // окна в mutter), отсюда плавающий промах. Ждём первый кадр, затем
-    // откладываем максимизацию в idle, когда размеры уже согласованы.
+    // At window-created the MetaWindowActor already exists, but the window has
+    // not been drawn yet and the application has not negotiated its geometry.
+    // Maximizing at this point is frequently dropped (a window-init race in
+    // mutter), which is the intermittent miss. Wait for the first frame, then
+    // defer the maximize to an idle callback once the size is settled.
     let firstFrameId = 0;
     firstFrameId = actor.connect("first-frame", () => {
       actor.disconnect(firstFrameId);
@@ -87,10 +87,10 @@ export default class MaximizeNewWindows extends Extension {
       (_display, win) => this._onWindowCreated(win),
     );
 
-    // Уже существующие окна не порождают window-created (например, после
-    // перезапуска gnome-shell через Alt+F2 r на X11, или при включении
-    // расширения, когда окна уже открыты). Максимизируем их отдельно;
-    // они уже отрисованы, поэтому достаточно отложить вызов в idle.
+    // Already existing windows do not emit window-created (for example after a
+    // gnome-shell restart via Alt+F2 r on X11, or when the extension is enabled
+    // while windows are already open). Maximize them separately; they have
+    // already been drawn, so deferring to an idle callback is enough.
     for (const actor of global.get_window_actors()) {
       this._maximizeLater(actor.meta_window);
     }
