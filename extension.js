@@ -60,14 +60,6 @@ export default class MaximizeNewWindows extends Extension {
     this._sources.add(sourceId);
   }
 
-  // Stop tracking an actor entry and disconnect both of its signals. Safe to
-  // call more than once: the Set.delete() guard makes repeat calls no-ops.
-  _cleanupEntry(entry) {
-    if (!this._actorSignals.delete(entry)) return;
-    if (entry.firstFrameId) entry.actor.disconnect(entry.firstFrameId);
-    if (entry.destroyId) entry.actor.disconnect(entry.destroyId);
-  }
-
   _onWindowCreated(win) {
     const actor = win.get_compositor_private();
     if (!actor) return;
@@ -77,31 +69,29 @@ export default class MaximizeNewWindows extends Extension {
     // Maximizing at this point is frequently dropped (a window-init race in
     // mutter), which is the intermittent miss. Wait for the first frame, then
     // defer the maximize to an idle callback once the size is settled.
-    const entry = { actor, firstFrameId: 0, destroyId: 0 };
-
-    entry.firstFrameId = actor.connect("first-frame", () => {
-      this._cleanupEntry(entry);
-      this._maximizeLater(win);
-    });
-
-    // The window can be destroyed before its first frame is drawn (a quickly
-    // closed or crashed application): first-frame would never fire and the
-    // entry would leak in _actorSignals, holding a reference to a destroyed
-    // actor until disable(). Drop it on the actor's destroy as well.
-    entry.destroyId = actor.connect("destroy", () => {
-      this._cleanupEntry(entry);
-    });
-
-    this._actorSignals.add(entry);
+    //
+    // connectObject ties the handler to `this` as its owner. The signal tracker
+    // also disconnects it automatically when the actor is destroyed, so a window
+    // closed before its first frame (a quickly closed or crashed application)
+    // cannot leak a handler on a dead actor. first-frame is one-shot: disconnect
+    // it once it has fired.
+    actor.connectObject(
+      "first-frame",
+      () => {
+        actor.disconnectObject(this);
+        this._maximizeLater(win);
+      },
+      this,
+    );
   }
 
   enable() {
-    this._actorSignals = new Set();
     this._sources = new Set();
 
-    this._windowCreatedId = global.display.connect(
+    global.display.connectObject(
       "window-created",
       (_display, win) => this._onWindowCreated(win),
+      this,
     );
 
     // Already existing windows do not emit window-created (for example after a
@@ -115,19 +105,15 @@ export default class MaximizeNewWindows extends Extension {
   }
 
   disable() {
-    if (this._windowCreatedId) {
-      global.display.disconnect(this._windowCreatedId);
-      this._windowCreatedId = null;
-    }
+    global.display.disconnectObject(this);
 
-    // Do not use _cleanupEntry here: it mutates the Set, which is unsafe while
-    // iterating. Disconnect directly, then clear the whole set at once.
-    for (const entry of this._actorSignals) {
-      if (entry.firstFrameId) entry.actor.disconnect(entry.firstFrameId);
-      if (entry.destroyId) entry.actor.disconnect(entry.destroyId);
+    // Disconnect first-frame handlers still pending on windows that have not
+    // drawn their first frame yet. Actors that already fired (and disconnected
+    // themselves) or were destroyed (auto-disconnected by the signal tracker)
+    // are a no-op here. This replaces the manual signal-id bookkeeping.
+    for (const actor of global.get_window_actors()) {
+      actor.disconnectObject(this);
     }
-    this._actorSignals.clear();
-    this._actorSignals = null;
 
     for (const id of this._sources) {
       GLib.Source.remove(id);
