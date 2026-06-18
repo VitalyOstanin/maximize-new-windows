@@ -5,10 +5,8 @@ import Meta from "gi://Meta";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
 export default class MaximizeNewWindows extends Extension {
-  // GNOME 49 changed the maximize API: get_maximized() was replaced by
-  // is_maximized()/get_maximize_flags(), and maximize() lost its directions
-  // argument (it now maximizes BOTH by default). Detect the new API by the
-  // presence of get_maximize_flags() so the same code works on GNOME 45-50.
+  // GNOME 49+: get_maximized() became get_maximize_flags() and maximize() now
+  // defaults to BOTH. Detect by get_maximize_flags() to support GNOME 45-50.
   _hasNewMaximizeApi(win) {
     return typeof win.get_maximize_flags === "function";
   }
@@ -40,16 +38,13 @@ export default class MaximizeNewWindows extends Extension {
 
     if (this._isFullyMaximized(win)) return;
 
-    // By now the geometry should be settled; a zero size means the window is
-    // not ready yet, so skip it.
+    // Zero size means geometry not settled yet; skip.
     const rect = win.get_frame_rect();
     if (rect.width === 0 || rect.height === 0) return;
 
     this._doMaximize(win);
   }
 
-  // One-shot deferred call in an idle callback, tracked in this._sources so
-  // the timer can be removed in disable().
   _maximizeLater(win) {
     let sourceId = 0;
     sourceId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
@@ -64,17 +59,9 @@ export default class MaximizeNewWindows extends Extension {
     const actor = win.get_compositor_private();
     if (!actor) return;
 
-    // At window-created the MetaWindowActor already exists, but the window has
-    // not been drawn yet and the application has not negotiated its geometry.
-    // Maximizing at this point is frequently dropped (a window-init race in
-    // mutter), which is the intermittent miss. Wait for the first frame, then
-    // defer the maximize to an idle callback once the size is settled.
-    //
-    // connectObject ties the handler to `this` as its owner. The signal tracker
-    // also disconnects it automatically when the actor is destroyed, so a window
-    // closed before its first frame (a quickly closed or crashed application)
-    // cannot leak a handler on a dead actor. first-frame is one-shot: disconnect
-    // it once it has fired.
+    // Maximizing at window-created is frequently dropped (window-init race in
+    // mutter); wait for first-frame, then defer to idle once geometry settled.
+    // first-frame is one-shot: disconnect once it has fired.
     actor.connectObject(
       "first-frame",
       () => {
@@ -94,10 +81,8 @@ export default class MaximizeNewWindows extends Extension {
       this,
     );
 
-    // Already existing windows do not emit window-created (for example after a
-    // gnome-shell restart via Alt+F2 r on X11, or when the extension is enabled
-    // while windows are already open). Maximize them separately; they have
-    // already been drawn, so deferring to an idle callback is enough.
+    // Pre-existing windows (shell restart, or enabled with windows already open)
+    // do not emit window-created; maximize them separately.
     for (const actor of global.get_window_actors()) {
       const win = actor.meta_window;
       if (win) this._maximizeLater(win);
@@ -107,10 +92,8 @@ export default class MaximizeNewWindows extends Extension {
   disable() {
     global.display.disconnectObject(this);
 
-    // Disconnect first-frame handlers still pending on windows that have not
-    // drawn their first frame yet. Actors that already fired (and disconnected
-    // themselves) or were destroyed (auto-disconnected by the signal tracker)
-    // are a no-op here. This replaces the manual signal-id bookkeeping.
+    // Disconnect first-frame handlers still pending; already-fired or destroyed
+    // actors are a no-op.
     for (const actor of global.get_window_actors()) {
       actor.disconnectObject(this);
     }
